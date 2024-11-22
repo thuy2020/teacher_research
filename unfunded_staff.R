@@ -107,7 +107,10 @@ summary(m)
 m1 <- lmer(revenues ~ retire_debt_1k  + (1 | name), data = sd_acfr)
 summary(m1)
 
-staff_data <- acfr_nces %>% select(staff_pupil_lag, retire_debt_1k) %>% filter(!is.na(staff_pupil_lag)) 
+staff_data <- acfr_nces %>% select(staff_pupil_lag, retire_debt_1k) %>% 
+  filter(retire_debt_1k > 1) %>% 
+  filter(staff_pupil_lag > 0) %>% 
+  filter(staff_pupil_lag != "Inf")
 
 # fix-effect, estimating coef for each district. SD > 85000 --> negative, significant
 m0 <- lm(log(staff_pupil_lag) ~ log(retire_debt_1k), data = staff_data)
