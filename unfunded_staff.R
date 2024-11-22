@@ -8,21 +8,50 @@ library(stringr)
 sd_raw <- read.csv("https://raw.githubusercontent.com/thuy2020/acfrs_data/refs/heads/main/output/all_schooldistricts_4years.csv")
 
 sd_acfr <- sd_raw %>% 
+  
+  #replace NA with 0
   mutate(net_opeb_liability = replace_na(net_opeb_liability, 0),
          net_pension_liability = replace_na(net_pension_liability,0),
-    retire_debt_1k = (net_opeb_liability + net_pension_liability)/1000) %>% 
+          retire_debt = (net_opeb_liability + net_pension_liability)) %>% 
+  
+  #only get those with debt > 1
+  filter(retire_debt >= 1) %>% 
+  filter(revenues >= 0) %>% 
+  
   mutate(nces_id = str_squish(ncesID), 
-         state_abb = str_squish(state.abb),
-         state.name = str_squish(state.name)) %>% 
-  select(id, nces_id, state_abb, name, year, retire_debt_1k, revenues, expenses) %>% 
-  filter(retire_debt_1k >= 1) %>% 
+         state_abb = str_squish(state.abb)) %>% 
+  select(id, nces_id, state_abb, name, year, retire_debt, revenues, expenses) %>% 
+  
   arrange(year) %>% 
   group_by(state_abb, name) %>% 
-  mutate(revenues_lag = dplyr::lead(revenues, 1)) %>% 
-    ungroup()
+  
+  #create lag values
+  mutate(revenues_lag = dplyr::lead(revenues, 1),
+         revenues_lag = replace_na(revenues_lag, 0)) %>% 
+  ungroup() %>% 
+  mutate(retire_debt = replace_na(retire_debt, 0)) %>% 
+  filter(revenues_lag != "Inf") %>% 
+  drop_na(revenues_lag) %>% 
+  filter(retire_debt != "Inf") %>% 
+  drop_na(retire_debt)
 
-wider <- sd_acfr %>% select(id, name, year, retire_debt_1k) %>% 
-  pivot_wider(names_from = year, values_from = retire_debt_1k) %>% 
+#####revenues ~ debt#####
+sd_acfr %>% filter(retire_debt) %>% View()
+
+m_revenues <- lm(revenues_lag ~ retire_debt, data = sd_acfr)
+summary(m_revenues)
+
+# every dollar increase in retire_debt is associated with 48 cents increase in revenues the year after. 
+#highly statistically significant.
+
+#TODO: need to check log model too
+#m_revenues <- lm(log(revenues_lag) ~ log(retire_debt), data = sd_acfr)
+#summary(m_revenues)
+
+
+#####debts increase over years for all#####
+sd_acfr_wider <- sd_acfr %>% select(id, name, year, retire_debt) %>% 
+  pivot_wider(names_from = year, values_from = retire_debt) %>% 
   rowwise() %>%
   mutate(
     #`2020_2021` = `2021` > `2020`,
@@ -32,9 +61,9 @@ wider <- sd_acfr %>% select(id, name, year, retire_debt_1k) %>%
   ) %>%
   ungroup()
 
-#wider %>% filter(`2020_2023` == FALSE) %>% View()
+#TODO: need to investigate this. Whose debts keep going over years?
+sd_acfr_wider %>% filter(`2020_2023` == TRUE) %>% View()
 
-sapply(sd_acfr, class)
 ####NECES####
 #download Nov 20, 2024: https://nces.ed.gov/ccd/elsi/tableGenerator.aspx?savedTableID=64912
 
@@ -59,22 +88,26 @@ nces <- read.csv("data/ELSI_csv_export_6386771175811766728585.csv", skip = 6) %>
   filter(year >= 2020) %>%
   mutate(staff_pupil = total_staff_district/ total_students_all_grades_excludes_ae_district)
   #filter(total_students_all_grades_excludes_ae_district >=85000)
-  
-nces
 
-sapply(nces, class)
+nces %>% View()
 ####Combined data####
 acfr_nces <- sd_acfr %>% 
   left_join(nces, by = c("nces_id", "state_abb", "year")) %>% 
   drop_na() %>% 
 
-# create lag year 
+# create lag year for all
   arrange(year)  %>% 
   group_by(name) %>% 
   mutate(across(7:29, ~ dplyr::lead(.x, 1), .names = "{.col}_lag")  # Create lagged columns
     ) %>%
-    ungroup()
+    ungroup() %>% 
   
+  #clean to make sure log works
+  filter(retire_debt > 1) %>% 
+  filter(staff_pupil_lag > 0) %>% 
+  filter(staff_pupil_lag != "Inf")
+  
+acfr_nces %>% View()
 acfr_nces %>% colnames() %>% sort()
 # [1] "elementary_school_counselor_district"                       "elementary_school_counselor_district_lag"                  
 # [3] "full_time_equivalent_fte_teachers_district"                 "id"                                                        
@@ -98,42 +131,13 @@ acfr_nces %>% colnames() %>% sort()
 # [39] "total_guidance_counselors_district_lag"                     "total_staff_district"                                      
 # [41] "total_staff_district_lag"                                   "total_students_all_grades_excludes_ae_district"  
 
-#revenues ~ , retire_debt_1k
+####staff per pupil; ~ debt####
 
-m <- lm(revenues_lag ~ retire_debt_1k, data = sd_acfr)
-summary(m)
+#log model
+m_staff_pupil <- lm(log(staff_pupil_lag) ~ log(retire_debt), data = acfr_nces)
+summary(m_staff_pupil)
+# 1 % increase in retirement debt is associated with 2.328% decrease in staff per pupil
 
-
-m1 <- lmer(revenues ~ retire_debt_1k  + (1 | name), data = sd_acfr)
-summary(m1)
-
-staff_data <- acfr_nces %>% select(staff_pupil_lag, retire_debt_1k) %>% 
-  filter(retire_debt_1k > 1) %>% 
-  filter(staff_pupil_lag > 0) %>% 
-  filter(staff_pupil_lag != "Inf")
-
-# fix-effect, estimating coef for each district. SD > 85000 --> negative, significant
-m0 <- lm(log(staff_pupil_lag) ~ log(retire_debt_1k), data = staff_data)
-summary(m0)
-
-# fix-effect, W/O estimating coef for each district
-m1 <- lm(school_administrative_support_staff_district_lag ~ retire_debt_1k, 
-         data = acfr_nces)
-summary(m1)
-
-#linear mixed-effects model: district-specific variability without estimating coefficients for every district
-
-library(lme4)
-m1 <- lmer(other_guidance_counselors_district_lag ~ retire_debt_1k  + (1 | name), data = acfr_nces)
-summary(m1)
-
-
-library(plm)
-pdata <- pdata.frame(acfr_nces, index = c("name", "year"))
-
-m0 <- plm(instructional_coordinators_district_lag ~ retire_debt_1k, data = pdata, model = "within")
-summary(m0)
-
-m0_re <- plm(lea_administrators_district_lag ~ retire_debt_1k, data = pdata, model = "random")
-summary(m0_re)
-
+m_pupil_teacher <- lm(log(pupil_teacher_ratio_district_lag) ~ log(retire_debt), data = acfr_nces)
+summary(m_pupil_teacher)
+#NOT the same effect with teacher
